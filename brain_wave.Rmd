@@ -1,0 +1,275 @@
+---
+title: "Eye Movement Detection"
+author: '475760104'
+date: "03/04/2020"
+output: html_document
+---
+
+``` {r setup, message=F,warning=F,include=F,echo=F}
+library(tidyverse)
+library(tuneR)
+library(ggplot2)
+library(caret)
+library(tsfeatures)
+library(e1071)
+library(randomForest)
+library(tree)
+library(plotrix)
+library(reprtree)
+library(cvTools)
+library(MLmetrics)
+library(reshape2)
+library(gridExtra)
+library(AdaSampling)
+```
+
+``` {r zoe, message=F,warning=F}
+zoe_files_short = list.files("zoe_spiker/Length3/")
+zoe_wave_short = list()
+for (i in zoe_files_short){
+  zoe_wave_short = c(zoe_wave_short, list(readWave(file.path("zoe_spiker/Length3/",i))))}
+zoe_label_short = lapply(strsplit(zoe_files_short, "_"), "[[", 1)
+zoe_label_short = lapply(zoe_label_short, function(x) strsplit(x, "")[[1]])
+
+zoe_files_med = list.files("zoe_spiker/Length8/")
+zoe_wave_med = list()
+for (i in zoe_files_med){
+  zoe_wave_med = c(zoe_wave_med, list(readWave(file.path("zoe_spiker/Length8/",i))))}
+zoe_label_med = lapply(strsplit(zoe_files_med, "_"), "[[", 1)
+zoe_label_med = lapply(zoe_label_med, function(x) strsplit(x, "")[[1]])
+
+zoe_files_long = list.files("zoe_spiker/Long/")
+zoe_wave_long = list()
+for (i in zoe_files_long){
+  zoe_wave_long = c(zoe_wave_long, list(readWave(file.path("zoe_spiker/Long/",i))))}
+zoe_label_long = lapply(strsplit(zoe_files_long, "_"), "[[", 1)
+zoe_label_long = lapply(zoe_label_long, function(x) strsplit(x, "")[[1]])
+```
+
+``` {r louis, message=F,warning=F}
+louis_files_short = list.files("Spiker_box_Louis/Short/")
+louis_wave_short = list()
+for (i in louis_files_short){
+  louis_wave_short = c(louis_wave_short, list(readWave(file.path("Spiker_box_Louis/Short/",i))))}
+louis_label_short = lapply(strsplit(louis_files_short, "_"), "[[", 1)
+louis_label_short = lapply(louis_label_short, function(x) strsplit(x, "")[[1]])
+
+louis_files_med = list.files("Spiker_box_Louis/Medium/")
+louis_wave_med = list()
+for (i in louis_files_med){
+  louis_wave_med = c(louis_wave_med, list(readWave(file.path("Spiker_box_Louis/Medium/",i))))}
+louis_label_med = lapply(strsplit(louis_files_med, "_"), "[[", 1)
+louis_label_med = lapply(louis_label_med, function(x) strsplit(x, "")[[1]])
+
+louis_files_long = list.files("Spiker_box_Louis/Long/")
+louis_wave_long = list()
+for (i in louis_files_long){
+  louis_wave_long = c(louis_wave_long, list(readWave(file.path("Spiker_box_Louis/Long/",i))))}
+louis_label_long = lapply(strsplit(louis_files_long, "_"), "[[", 1)
+louis_label_long = lapply(louis_label_long, function(x) strsplit(x, "")[[1]])
+```
+
+``` {r sdFun, message=F,warning=F}
+identify_event_sd = function(Y,  xtime, 
+                           windowSize = 1, 
+                           thresholdEvents = 650,
+                           downSampleRate = 25) {
+  
+  x = max(xtime) - windowSize
+  indexLastWindow = max(which(xtime <= x)) + 1
+  ind = seq(1, indexLastWindow, by = downSampleRate)
+  
+  timeMiddle = xtime[ind] + windowSize/2 
+  testStat = rep(NA, length(ind))
+  
+  for (i in 1:length(ind)) {
+    Y_subset = Y[xtime >= xtime[ind[i]] & xtime < xtime[ind[i]] + windowSize]
+    testStat[i] =  sd(Y_subset)
+  }
+  
+  predictedEvent = which(testStat > thresholdEvents)
+  eventTimes = timeMiddle[predictedEvent]
+  
+  gaps = which(diff(eventTimes) > mean(diff(eventTimes)))
+  noiseInterval = rbind(
+    c(range(xtime)[1], min(eventTimes)),
+    cbind(eventTimes[gaps], eventTimes[gaps+1]),
+    c(max(eventTimes), range(xtime)[2])
+  )
+  
+  eventsInterval = cbind(noiseInterval[-nrow(noiseInterval),2], 
+                          noiseInterval[-1,1])
+  
+  return(list(num_event = length(gaps) + 1, 
+              predictedNoiseInterval = noiseInterval,
+              predictedEventInterval = eventsInterval))
+}
+```
+
+``` {r extractFun, message=F,warning=F}
+extractSignal = function(limits, seq, xtime)
+{
+  index = (xtime > limits[1]) & (xtime < limits[2])
+  return(seq[index])
+}
+```
+
+``` {r extractZoe, message=F,warning=F}
+wave_seq_short = list()
+for(i in 1:length(zoe_wave_short)){
+  # print(i)
+  wave_file = zoe_wave_short[[i]]
+  Y = wave_file@left
+  xtime = seq_len(length(Y))/wave_file@samp.rate 
+  cut_result = identify_event_sd(Y, xtime)
+  wave_seq_short[[i]] = apply(cut_result$predictedEventInterval, 1, extractSignal, Y, xtime)
+}
+wave_seq_short[[11]] = wave_seq_short[[11]][1:3]
+wave_seq_short[[12]] = wave_seq_short[[12]][1:3]
+```
+
+``` {r featureFun, message=F,warning=F}
+features = function(alist)
+{cbind(
+  tsfeatures(alist, c("acf_features","lumpiness","flat_spots","crossing_points")),
+  tsfeatures(alist, "max_kl_shift", width=48),
+  tsfeatures(alist, c("mean","var"), scale=FALSE, na.rm=TRUE),
+  tsfeatures(alist,c("max_level_shift","max_var_shift"), trim=TRUE))
+}
+```
+
+``` {r feature, message=F,warning=F}
+Y_list = unlist(wave_seq_short, recursive=FALSE)
+Y_lab = unlist(zoe_label_short)
+Y_features = features(Y_list)
+```
+
+``` {r cv, message=F,warning=F}
+cvK = 5
+ACC_rf = NA
+n = length(Y_lab)
+for (i in 1:50) {
+  cvSets = cvTools::cvFolds(n, cvK)  
+  acc_rf = NA
+  for (j in 1:cvK) {
+    test_id = cvSets$subsets[cvSets$which == j]
+    X_test = Y_features[test_id, ]
+    X_train = Y_features[-test_id, ]
+    y_test = Y_lab[test_id]
+    y_train = Y_lab[-test_id]
+    
+    rf_res = randomForest::randomForest(x = X_train, y = as.factor(y_train))
+    rf_fit = predict(rf_res, X_test)
+    acc_rf[j] = MLmetrics::Accuracy(y_pred = rf_fit, y_true = y_test)
+  }
+  ACC_rf[i] = mean(acc_rf)
+}
+
+ACC = data.frame(ACC_rf)
+
+fun_mean <- function(x){
+  return(data.frame(y=mean(x),label=mean(x,na.rm=T)))}
+
+ACC %>% ggplot(aes(x = 0,y = ACC_rf)) +
+  geom_boxplot() +
+  ylab('Accuracy') +
+  xlab('') +
+  labs(title = 'Accuracy of Random Forest',
+       caption = 'Figure 2: accuracy of random forest') +
+  stat_summary(fun.y = mean, geom="point",colour="darkred", size=3) +
+  theme_minimal() +
+  stat_summary(fun.data = fun_mean, geom="text", vjust=-0.7)
+```
+
+``` {r rf, message=F,warning=F}
+rf = randomForest::randomForest(x = Y_features, y = as.factor(Y_lab))
+```
+
+``` {r streaming, message=F,warning=F}
+testWave = louis_wave_long[[2]]@left
+time = seq_len(length(testWave))/zoe_wave_short[[1]]@samp.rate
+
+window_size = 10000
+step_size = 1000
+last = length(testWave)-window_size+1
+i = 1
+stamp = NA
+happen = FALSE
+m=1
+movement = rep('None',length(testWave))
+
+while (i < last) {
+  window = testWave[i:(i+window_size-1)]
+  if (sd(window) > 500) 
+    {stamp[m] = i
+     m = m+1
+     happen = TRUE}
+  else if (happen == TRUE) 
+    {if (min(stamp) != max(stamp)) 
+      {event = testWave[(min(stamp)):(max(stamp)+window_size/2)]
+       LR = sign(unique(event[abs(event) == max(abs(event))]))
+       print(paste(time[min(stamp)],':',time[max(stamp)+window_size/2]))
+       if (LR == 1)
+         {movement[(min(stamp)):(max(stamp)+window_size/2)]='Right'
+         print('Right')}
+       else
+         {movement[(min(stamp)+window_size/2):(max(stamp)+window_size/2)]='Left'
+         print('Left')}
+       m = 1
+       stamp = NA
+       happen = FALSE}
+     }
+     i = i+step_size}
+```
+
+``` {r plot, message=F,warning=F}
+df = data.frame(time,testWave,movement)
+df %>% ggplot(aes(x=time,y=testWave,col=movement,group=1)) +
+  geom_line() +
+  theme_minimal() +
+  xlab('Time in second') +
+  ylab('Alpha wave amplitude') +
+  labs(title = 'Unsuccessful Classification',
+       caption = 'Figure 5: an example of unsuccessful classification') +
+  scale_color_manual(values = c("#377EB8", "black","#E41A1C"))
+```
+
+``` {r streamingRF, message=F,warning=F}
+testWave = zoe_wave_med[[1]]@left
+time = seq_len(length(testWave))/zoe_wave_short[[1]]@samp.rate
+
+window_size = 10000
+step_size = 1000
+last = length(testWave)-window_size+1
+i = 1
+stamp = NA
+happen = FALSE
+m=1
+movement = rep('None',length(testWave))
+
+while (i < last) {
+  window = testWave[i:(i+window_size-1)]
+  if (sd(window) > 500) 
+    {stamp[m] = i
+     m = m+1
+     happen = TRUE}
+  else if (happen == TRUE) 
+    {if (min(stamp) != max(stamp)) 
+      {event = testWave[(min(stamp)):(max(stamp)+window_size/2)]
+       event_feature = featurers(event)
+       LR = predict(rf,event_feature)
+       print(paste(time[min(stamp)],':',time[max(stamp)+window_size/2]))
+       if (LR == -1)
+         {movement[(min(stamp)):(max(stamp)+window_size/2)]='Right'
+         print('Right')}
+       else
+         {movement[(min(stamp)+window_size/2):(max(stamp)+window_size/2)]='Left'
+         print('Left')}
+       m = 1
+       stamp = NA
+       happen = FALSE}
+     }
+     i = i+step_size}
+```
+
+
